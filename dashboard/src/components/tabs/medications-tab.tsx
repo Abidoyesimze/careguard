@@ -1,13 +1,16 @@
 "use client";
 
+import { useState } from "react";
 import { toast } from "sonner";
 import { downloadMedicationPDF } from "../../app/pdf";
 import {
   DrugInteractionResultSchema,
   PharmacyCompareResultSchema,
   type RecipientProfile,
+  type Vital,
 } from "../../lib/types";
 import type { AgentResult } from "../types";
+import { VitalsSection } from "../vitals-section";
 import { getTranslations, type Locale } from "../../i18n";
 
 const MEDS = ["Lisinopril", "Metformin", "Atorvastatin", "Amlodipine"] as const;
@@ -20,6 +23,7 @@ export interface MedicationsTabProps {
 
 export function MedicationsTab({ agentResult, recipient, locale = "en" }: MedicationsTabProps) {
   const t = getTranslations(locale).medications;
+  const [vitals, setVitals] = useState<Vital[]>([]);
   const hasPriceResults = agentResult?.toolCalls.some(
     (t) => t.tool === "compare_pharmacy_prices",
   );
@@ -58,7 +62,7 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
                         ? DrugInteractionResultSchema.parse(interactionResult)
                         : undefined,
                     },
-                    { recipient },
+                    { recipient, vitals },
                   );
                 } catch {
                   toast.error("Couldn't parse medication result — try again");
@@ -97,7 +101,7 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
               >
                 <div>
                   <div className="font-medium text-sm">{drug}</div>
-<div className={r ? "text-xs text-slate-500" : "text-xs text-slate-400 italic">
+                  <div className={r ? "text-xs text-slate-500" : "text-xs text-slate-400 italic"}>
                   {r
                     ? `${t.best}: ${r.cheapest.pharmacyName} at $${r.cheapest.price}`
                     : t.notYetCompared}
@@ -118,6 +122,7 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
           })}
         </div>
       </div>
+      <VitalsSection locale={locale} onVitalsChange={setVitals} />
       {interactionCalls && interactionCalls.length > 0 && (
         <div className="bg-white rounded-xl border border-slate-200 p-6">
           <h2 className="text-sm font-semibold text-slate-700 mb-4">
