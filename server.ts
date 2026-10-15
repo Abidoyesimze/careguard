@@ -49,6 +49,14 @@ import { registerKnownNames } from "./shared/redact.ts";
 
 // Sentry (gated by SENTRY_DSN)
 import { initSentry } from "./shared/sentry.ts";
+import {
+  loadRecipientAllergies,
+  addRecipientAllergy,
+  removeRecipientAllergy,
+} from "./shared/allergies.ts";
+import { loadPresenceMap, recordItemView } from "./shared/presence.ts";
+import { extractLineItemsFromBillImage } from "./shared/bill-ocr.ts";
+import { runPriceWatchForRecipient } from "./agent/price-watch.ts";
 
 // Observability
 import { requestLifecycleMiddleware } from "./shared/request-lifecycle.ts";
@@ -1123,6 +1131,75 @@ app.post(
   },
 );
 
+// --- Allergies endpoints (#1230) ---
+app.get("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ allergies: loadRecipientAllergies(recipientId), recipientId });
+});
+
+app.post("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
+  const { substance, severity, reaction, notes } = req.body ?? {};
+  if (!substance || !severity) {
+    return res.status(400).json({ error: "substance and severity are required" });
+  }
+  const created = addRecipientAllergy({ substance, severity, reaction, notes }, recipientId);
+  res.status(201).json(created);
+});
+
+app.delete("/agent/allergies/:id", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  const success = removeRecipientAllergy(req.params.id, recipientId);
+  res.json({ success });
+});
+
+// --- Co-Caregiver Presence endpoints (#1231) ---
+app.get("/agent/presence", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ presence: loadPresenceMap(recipientId), recipientId });
+});
+
+app.post("/agent/presence/view", (req, res) => {
+  const { itemId, itemType, caregiverId, caregiverName, avatar, recipientId } = req.body ?? {};
+  if (!itemId || !itemType || !caregiverId || !caregiverName) {
+    return res.status(400).json({ error: "itemId, itemType, caregiverId, and caregiverName are required" });
+  }
+  const entry = recordItemView({
+    itemId,
+    itemType,
+    caregiverId,
+    caregiverName,
+    avatar,
+    recipientId,
+  });
+  res.json({ success: true, entry });
+});
+
+// --- Bill OCR endpoint (#1229) ---
+app.post("/bill/ocr", async (req, res) => {
+  const { image } = req.body ?? {};
+  if (!image || typeof image !== "string") {
+    return res.status(400).json({ error: "image (base64) is required" });
+  }
+  try {
+    const result = await extractLineItemsFromBillImage(image);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "OCR extraction failed" });
+  }
+});
+
+// --- Price watch endpoint (#1236) ---
+app.post("/agent/price-watch/run", async (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  try {
+    const result = await runPriceWatchForRecipient(recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Price watch failed" });
+  }
+});
+
 // ============================================================
 // START
 // ============================================================
@@ -1190,6 +1267,37 @@ async function startWalletBalanceScheduler(): Promise<void> {
   logger.info({ expr }, "wallet balance scheduler armed");
 }
 
+async function startPriceWatchScheduler(): Promise<void> {
+  if (process.env.PRICE_WATCH_ENABLED === "0") return;
+  const cronExpr = process.env.PRICE_WATCH_CRON || "0 8 * * *";
+
+  let cron: any;
+  try {
+    cron = await import("node-cron");
+  } catch {
+    logger.warn(
+      "price-watch scheduler enabled but node-cron not installed — falling back to setInterval(24h)",
+    );
+    setInterval(() => {
+      runPriceWatchForRecipient("rosa").catch((err) =>
+        logger.warn({ err: err?.message }, "[price-watch] error in interval run"),
+      );
+    }, 24 * 60 * 60_000);
+    return;
+  }
+
+  const expr = cron.validate?.(cronExpr) ? cronExpr : "0 8 * * *";
+  cron.schedule(expr, async () => {
+    try {
+      await runPriceWatchForRecipient("rosa");
+    } catch (err: any) {
+      logger.warn({ err: err?.message }, "[price-watch] error in scheduled run");
+    }
+  });
+
+  logger.info({ expr }, "medication price-watch scheduler armed");
+}
+
 export async function bootAccountCheck(
   serverInstance: Horizon.Server = horizonServer,
   publicKey: string = agentKeypair.publicKey(),
@@ -1238,6 +1346,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       "CareGuard Unified Server started",
     );
     await startWalletBalanceScheduler();
+    await startPriceWatchScheduler();
   });
 
   gracefulShutdown({

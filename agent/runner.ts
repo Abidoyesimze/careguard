@@ -40,6 +40,8 @@ import {
   getAdherenceStatus,
   confirmAdherenceReminder,
   setCurrentRecipient,
+  checkRecipientAllergies,
+  runPriceWatch,
   TOOL_DEFINITIONS,
   validateToolInput,
 } from "./tools.ts";
@@ -203,6 +205,16 @@ export async function executeTool(name: string, input: Record<string, unknown>):
         break;
       case "check_drug_interactions":
         result = await checkDrugInteractions(input.medications as string[]);
+        break;
+      case "check_allergies":
+        result = checkRecipientAllergies(input.medications as string[], rid);
+        break;
+      case "run_price_watch":
+        result = await runPriceWatch(
+          rid,
+          input.medications as string[] | undefined,
+          input.zip_code as string | undefined,
+        );
         break;
       case "fetch_tool_result":
         result = fetchToolResult(

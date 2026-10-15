@@ -4,12 +4,14 @@ import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { copyText } from "../../lib/clipboard";
 import { truncateAddress } from "../../lib/utils";
-import type { CaregiverProfile, RecipientProfile } from "../../lib/types";
+import type { CaregiverProfile, RecipientProfile, RecipientAllergy, AllergySeverity } from "../../lib/types";
 import { Toast } from "../primitives/toast";
 import { ConfirmDialog } from "../primitives/confirm-dialog";
 import type { AgentInfo } from "../types";
 import { NETWORK_LABEL } from "../../lib/stellar-network";
 import { getTranslations, type Locale } from "../../i18n";
+import { AGENT_URL } from "../../lib/agent-url";
+import { agentFetch } from "../../lib/agent-fetch";
 
 export interface RecipientOption {
   id: string;
@@ -57,6 +59,89 @@ export function SettingsTab({
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState(false);
   const [postSaveChangedFields, setPostSaveChangedFields] = useState<string[] | null>(null);
+
+  // --- Recipient Allergies State & Handlers (Issue #1230) ---
+  const [allergies, setAllergies] = useState<RecipientAllergy[]>([
+    {
+      id: "allergy-initial-penicillin",
+      substance: "Penicillin",
+      severity: "severe",
+      reaction: "Anaphylaxis / Hives",
+      notes: "Diagnosed 2018. Strictly avoid penicillin-class antibiotics.",
+      createdAt: new Date().toISOString(),
+    },
+  ]);
+  const [loadingAllergies, setLoadingAllergies] = useState(false);
+  const [isAddingAllergy, setIsAddingAllergy] = useState(false);
+  const [allergySubstance, setAllergySubstance] = useState("");
+  const [allergySeverity, setAllergySeverity] = useState<AllergySeverity>("severe");
+  const [allergyReaction, setAllergyReaction] = useState("");
+  const [allergyNotes, setAllergyNotes] = useState("");
+
+  const recipientId = selectedRecipientId || (recipient.name.toLowerCase().includes("rosa") ? "rosa" : "rosa");
+
+  useEffect(() => {
+    async function fetchAllergies() {
+      try {
+        setLoadingAllergies(true);
+        const res = await agentFetch(`${AGENT_URL}/agent/allergies?recipient_id=${recipientId}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.allergies) && data.allergies.length > 0) {
+            setAllergies(data.allergies);
+          }
+        }
+      } catch {
+        // Fall back to local default
+      } finally {
+        setLoadingAllergies(false);
+      }
+    }
+    fetchAllergies();
+  }, [recipientId]);
+
+  const handleAddAllergy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!allergySubstance.trim()) {
+      setToastMsg("Please specify the allergen substance");
+      return;
+    }
+    const newEntry: RecipientAllergy = {
+      id: `allergy-${Date.now()}`,
+      substance: allergySubstance.trim(),
+      severity: allergySeverity,
+      reaction: allergyReaction.trim() || undefined,
+      notes: allergyNotes.trim() || undefined,
+      createdAt: new Date().toISOString(),
+    };
+
+    setAllergies((prev) => [...prev, newEntry]);
+    setIsAddingAllergy(false);
+    setAllergySubstance("");
+    setAllergyReaction("");
+    setAllergyNotes("");
+
+    try {
+      await agentFetch(`${AGENT_URL}/agent/allergies`, {
+        method: "POST",
+        body: JSON.stringify(newEntry),
+      });
+      setToastMsg(`Added allergy record for ${newEntry.substance}`);
+    } catch {
+      setToastMsg(`Saved allergy record locally for ${newEntry.substance}`);
+    }
+  };
+
+  const handleRemoveAllergy = async (id: string, name: string) => {
+    setAllergies((prev) => prev.filter((a) => a.id !== id));
+    try {
+      await agentFetch(`${AGENT_URL}/agent/allergies/${id}`, { method: "DELETE" });
+    } catch {
+      // Local removal succeeded
+    }
+    setToastMsg(`Removed allergy: ${name}`);
+  };
+
   const [form, setForm] = useState({
     recipientName: "",
     recipientAge: "",
@@ -332,6 +417,153 @@ export function SettingsTab({
               <div className={readClass}>{recipient.insurance ?? "N/A"}</div>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Recipient Allergies & Adverse Reactions (Issue #1230) */}
+      <div className="bg-white rounded-xl border border-slate-200 p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+              <span>⚠️ Recipient Allergies & Adverse Reactions</span>
+              <span className="text-xs bg-red-100 text-red-700 font-medium px-2 py-0.5 rounded-full">
+                {allergies.length} documented
+              </span>
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">
+              Independent allergy registry checked before any medication purchase to prevent adverse reactions.
+            </p>
+          </div>
+          <button
+            onClick={() => setIsAddingAllergy(!isAddingAllergy)}
+            className="px-3 py-1.5 text-xs font-medium bg-red-50 text-red-700 border border-red-200 rounded-lg hover:bg-red-100 cursor-pointer transition-all"
+          >
+            {isAddingAllergy ? "Cancel" : "+ Add Allergy"}
+          </button>
+        </div>
+
+        {isAddingAllergy && (
+          <form onSubmit={handleAddAllergy} className="mb-4 p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
+            <h3 className="text-xs font-semibold text-slate-700">Add New Allergy or Adverse Reaction</h3>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Substance / Drug *</label>
+                <input
+                  type="text"
+                  required
+                  value={allergySubstance}
+                  onChange={(e) => setAllergySubstance(e.target.value)}
+                  placeholder="e.g. Penicillin, Sulfa, Aspirin"
+                  className={editClass + " w-full"}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Severity *</label>
+                <select
+                  value={allergySeverity}
+                  onChange={(e) => setAllergySeverity(e.target.value as AllergySeverity)}
+                  className={editClass + " w-full"}
+                >
+                  <option value="mild">Mild (rash, mild itching)</option>
+                  <option value="moderate">Moderate (hives, swelling)</option>
+                  <option value="severe">Severe (bronchospasm, facial swelling)</option>
+                  <option value="life_threatening">Life-Threatening (anaphylaxis, shock)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Specific Reaction</label>
+                <input
+                  type="text"
+                  value={allergyReaction}
+                  onChange={(e) => setAllergyReaction(e.target.value)}
+                  placeholder="e.g. Anaphylactic shock, hives, breathing difficulty"
+                  className={editClass + " w-full"}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Clinical Notes</label>
+                <input
+                  type="text"
+                  value={allergyNotes}
+                  onChange={(e) => setAllergyNotes(e.target.value)}
+                  placeholder="e.g. Diagnosed in ER, avoid all beta-lactams"
+                  className={editClass + " w-full"}
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsAddingAllergy(false)}
+                className="px-3 py-1.5 text-xs text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 cursor-pointer"
+              >
+                Save Allergy
+              </button>
+            </div>
+          </form>
+        )}
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs border-collapse">
+            <thead>
+              <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/50">
+                <th className="py-2 px-3 font-medium">Substance</th>
+                <th className="py-2 px-3 font-medium">Severity</th>
+                <th className="py-2 px-3 font-medium">Reaction</th>
+                <th className="py-2 px-3 font-medium">Notes</th>
+                <th className="py-2 px-3 font-medium text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {allergies.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-4 text-center text-slate-400">
+                    No allergies documented.
+                  </td>
+                </tr>
+              ) : (
+                allergies.map((allergy) => (
+                  <tr key={allergy.id} className="hover:bg-slate-50/50">
+                    <td className="py-2 px-3 font-medium text-slate-800">{allergy.substance}</td>
+                    <td className="py-2 px-3">
+                      <span
+                        className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold ${
+                          allergy.severity === "life_threatening"
+                            ? "bg-red-600 text-white"
+                            : allergy.severity === "severe"
+                            ? "bg-red-100 text-red-800"
+                            : allergy.severity === "moderate"
+                            ? "bg-amber-100 text-amber-800"
+                            : "bg-blue-100 text-blue-800"
+                        }`}
+                      >
+                        {allergy.severity.replace("_", "-").toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="py-2 px-3 text-slate-600">{allergy.reaction || "—"}</td>
+                    <td className="py-2 px-3 text-slate-500 max-w-xs truncate" title={allergy.notes}>
+                      {allergy.notes || "—"}
+                    </td>
+                    <td className="py-2 px-3 text-right">
+                      <button
+                        onClick={() => handleRemoveAllergy(allergy.id, allergy.substance)}
+                        className="text-red-500 hover:text-red-700 font-medium cursor-pointer"
+                        title="Remove allergy record"
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
