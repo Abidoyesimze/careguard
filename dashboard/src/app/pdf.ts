@@ -1,7 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { toast } from "sonner";
-import type { BillAuditResult, DrugInteractionResult, PharmacyCompareResult, SpendingData, Transaction, DisputeLetter } from "../lib/types";
+import type { BillAuditResult, DrugInteractionResult, PharmacyCompareResult, SpendingData, Transaction, DisputeLetter, RecipientAllergy } from "../lib/types";
 import { DEFAULT_PDF_THEME, type PdfTheme } from "../lib/pdf-theme";
 import type { RecipientProfile } from "../lib/types";
 import { TX_HASH_DISPLAY_LENGTH, truncateTransactionHash } from "../lib/tx-hash";
@@ -194,7 +194,11 @@ export function downloadBillAuditPDF(
 }
 
 export function downloadMedicationPDF(
-  params: { priceResults: PharmacyCompareResult[]; interactionResult?: DrugInteractionResult },
+  params: {
+    priceResults: PharmacyCompareResult[];
+    interactionResult?: DrugInteractionResult;
+    allergies?: RecipientAllergy[];
+  },
   options?: { theme?: PdfTheme; recipient?: RecipientProfile }
 ) {
   const theme = options?.theme ?? DEFAULT_PDF_THEME;
@@ -281,6 +285,39 @@ export function downloadMedicationPDF(
       headStyles: { fillColor: [245, 158, 11], fontSize: 7 },
       bodyStyles: { fontSize: 7 },
       columnStyles: { 3: { cellWidth: 70 } },
+    });
+  }
+
+  // Documented Allergies & Adverse Reactions (Issue #1230)
+  if ((params.allergies?.length ?? 0) > 0 && params.allergies) {
+    y = doc.lastAutoTable?.finalY ? doc.lastAutoTable.finalY + 8 : y + 10;
+    if (y > 240) { doc.addPage(); y = 20; }
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text("Documented Allergies & Adverse Reactions", 14, y);
+    y += 4;
+
+    autoTable(doc, {
+      startY: y,
+      head: [["Substance", "Severity", "Reaction", "Notes"]],
+      body: params.allergies.map((a) => [
+        a.substance,
+        a.severity.toUpperCase().replace("_", "-"),
+        a.reaction || "Unspecified",
+        a.notes || "-",
+      ]),
+      headStyles: { fillColor: [239, 68, 68], fontSize: 7 },
+      bodyStyles: { fontSize: 7 },
+      margin: { left: 14, right: 14 },
+      didParseCell: (data) => {
+        if (data.section === "body" && data.column.index === 1) {
+          const val = String(data.cell.raw || "");
+          if (val === "LIFE-THREATENING" || val === "SEVERE") {
+            data.cell.styles.textColor = [220, 38, 38];
+            data.cell.styles.fontStyle = "bold";
+          }
+        }
+      },
     });
   }
 

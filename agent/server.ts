@@ -48,9 +48,16 @@ import { getPendingAdherences, skipAdherence } from "../shared/adherence.ts";
 import { notify } from "../shared/notifications.ts";
 import { resolveStellarNetwork, validateSignerKeyForNetwork } from "../shared/stellar-network.ts";
 import { verifyWebhook } from "../shared/verify-webhook.ts";
-import { executeTool, runAgent, buildSystemPrompt } from "./runner.ts";
 import { requireApiKey } from "../shared/auth.ts";
 import { fetchWalletBalances } from "../shared/wallet-balance.ts";
+import {
+  loadRecipientAllergies,
+  addRecipientAllergy,
+  removeRecipientAllergy,
+} from "../shared/allergies.ts";
+import { loadPresenceMap, recordItemView } from "../shared/presence.ts";
+import { extractLineItemsFromBillImage } from "../shared/bill-ocr.ts";
+import { runPriceWatchForRecipient } from "./price-watch.ts";
 
 const PORT = parseInt(process.env.AGENT_PORT || "3004", 10);
 
@@ -601,6 +608,75 @@ app.post("/agent/dispute-letter", (req, res) => {
     caregiverEmail: caregiver_email,
   });
   res.json(letter);
+});
+
+// --- Allergies endpoints (#1230) ---
+app.get("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ allergies: loadRecipientAllergies(recipientId), recipientId });
+});
+
+app.post("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
+  const { substance, severity, reaction, notes } = req.body ?? {};
+  if (!substance || !severity) {
+    return res.status(400).json({ error: "substance and severity are required" });
+  }
+  const created = addRecipientAllergy({ substance, severity, reaction, notes }, recipientId);
+  res.status(201).json(created);
+});
+
+app.delete("/agent/allergies/:id", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  const success = removeRecipientAllergy(req.params.id, recipientId);
+  res.json({ success });
+});
+
+// --- Co-Caregiver Presence endpoints (#1231) ---
+app.get("/agent/presence", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ presence: loadPresenceMap(recipientId), recipientId });
+});
+
+app.post("/agent/presence/view", (req, res) => {
+  const { itemId, itemType, caregiverId, caregiverName, avatar, recipientId } = req.body ?? {};
+  if (!itemId || !itemType || !caregiverId || !caregiverName) {
+    return res.status(400).json({ error: "itemId, itemType, caregiverId, and caregiverName are required" });
+  }
+  const entry = recordItemView({
+    itemId,
+    itemType,
+    caregiverId,
+    caregiverName,
+    avatar,
+    recipientId,
+  });
+  res.json({ success: true, entry });
+});
+
+// --- Bill OCR endpoint (#1229) ---
+app.post("/bill/ocr", async (req, res) => {
+  const { image } = req.body ?? {};
+  if (!image || typeof image !== "string") {
+    return res.status(400).json({ error: "image (base64) is required" });
+  }
+  try {
+    const result = await extractLineItemsFromBillImage(image);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "OCR extraction failed" });
+  }
+});
+
+// --- Price watch endpoint (#1236) ---
+app.post("/agent/price-watch/run", async (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  try {
+    const result = await runPriceWatchForRecipient(recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Price watch failed" });
+  }
 });
 
 // Startup: verify agent wallet has USDC balance

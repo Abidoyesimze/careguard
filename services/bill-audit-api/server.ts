@@ -34,6 +34,7 @@ import { requestLifecycleMiddleware } from "../../shared/request-lifecycle.ts";
 import { gracefulShutdown } from "../../shared/graceful-shutdown.ts";
 import { sanitizeUserString } from "../../shared/sanitize.ts";
 import { billAuditOversizedRejectionsTotal } from "../../shared/metrics.ts";
+import { extractLineItemsFromBillImage } from "../../shared/bill-ocr.ts";
 
 const PORT = parseInt(process.env.BILL_AUDIT_API_PORT || "3002", 10);
 const PAY_TO = process.env.BILL_PROVIDER_PUBLIC_KEY;
@@ -388,6 +389,20 @@ app.use(
     next(err);
   },
 );
+
+// --- Bill OCR endpoint (#1229) ---
+app.post("/bill/ocr", async (req, res) => {
+  const { image } = req.body ?? {};
+  if (!image || typeof image !== "string") {
+    return res.status(400).json({ error: "image (base64) is required" });
+  }
+  try {
+    const result = await extractLineItemsFromBillImage(image);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "OCR extraction failed" });
+  }
+});
 
 let isDraining = false;
 app.get("/ready", (_req, res) => {
