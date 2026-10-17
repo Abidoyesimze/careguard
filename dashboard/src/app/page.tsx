@@ -136,6 +136,7 @@ export default function Dashboard() {
             agentResult={state.agentResult}
             recipient={recipient}
             locale={locale}
+            currentCaregiver={caregiver}
           />
         )}
         {activeTab === "approvals" && (
@@ -146,6 +147,7 @@ export default function Dashboard() {
             onApprove={state.approveTransaction}
             onCancel={state.cancelTransaction}
             locale={locale}
+            currentCaregiver={caregiver}
           />
         )}
         {activeTab === "policy" && (

@@ -102,6 +102,22 @@ import {
   createMockReceipt,
   isMockNetwork,
 } from "../shared/network-mode.ts";
+import {
+  checkMedicationAllergies,
+  loadRecipientAllergies,
+  addRecipientAllergy,
+  removeRecipientAllergy,
+  type RecipientAllergy,
+  type AllergyCheckResult,
+} from "../shared/allergies.ts";
+import {
+  runPriceWatchForRecipient,
+  type PriceWatchResult,
+} from "./price-watch.ts";
+import {
+  extractLineItemsFromBillImage,
+  type OcrExtractionResult,
+} from "../shared/bill-ocr.ts";
 
 assertMockNetworkAllowed();
 
@@ -2355,6 +2371,26 @@ export async function payForMedication(
       error: `BLOCKED BY PLATFORM CAP: $${amount.toFixed(2)} exceeds MAX_SINGLE_TX_USDC ($${getPlatformTxCap().toFixed(2)})`,
     };
   }
+
+  // Check recipient allergies (Issue #1230)
+  const targetRecipientId = _recipientId ?? currentRecipientId;
+  const allergyCheck = checkMedicationAllergies(drugName, targetRecipientId);
+  if (allergyCheck.blocked) {
+    const primaryConflict = allergyCheck.conflicts.find(
+      (c) => c.severity === "severe" || c.severity === "life_threatening",
+    );
+    logger.warn(
+      { drugName, recipientId: targetRecipientId, conflict: primaryConflict },
+      "[allergy-check] payment blocked due to severe allergy contraindication",
+    );
+    return {
+      success: false,
+      blocked: true,
+      reason: "ALLERGY_CONTRAINDICATION",
+      error: `BLOCKED BY ALLERGY GUARD: Patient has documented ${primaryConflict?.severity.replace("_", "-")} allergy to ${primaryConflict?.allergy.substance}. Cannot order ${drugName}.`,
+      conflicts: allergyCheck.conflicts,
+    };
+  }
   // Atomically check policy and reserve the budget before the async payment
   // check when only one slot remains in the budget.
   const release = await getBudgetMutex(currentRecipientId).acquire();
@@ -3203,7 +3239,81 @@ export const TOOL_DEFINITIONS = [
       required: ["record_id"],
     }),
   },
+  {
+    name: "check_allergies",
+    description:
+      "Check recipient's documented allergy and adverse-reaction list for candidate medications. Operates independently of drug-to-drug interaction checks. Returns safety status, warning on mild/moderate sensitivities and blocking on severe or life-threatening allergies.",
+    input_schema: strictInputSchema({
+      type: "object" as const,
+      properties: {
+        medications: {
+          type: "array",
+          items: { type: "string" },
+          description: "Array of medication names to check against allergy records",
+        },
+        recipient_id: {
+          type: "string",
+          description: "Care recipient ID (default: current recipient)",
+        },
+      },
+      required: ["medications"],
+    }),
+  },
+  {
+    name: "run_price_watch",
+    description:
+      "Proactively monitor prices for recurring medications across pharmacies and trigger alerts if materially cheaper alternatives (> $5 or 15% savings) are discovered. Respects caregiver opt-outs per medication.",
+    input_schema: strictInputSchema({
+      type: "object" as const,
+      properties: {
+        recipient_id: {
+          type: "string",
+          description: "Care recipient ID (default: current recipient)",
+        },
+        medications: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional list of medications to watch (defaults to recipient's regular meds)",
+        },
+        zip_code: {
+          type: "string",
+          description: "Optional ZIP code for local pharmacy pricing",
+        },
+      },
+      required: [] as string[],
+    }),
+  },
 ];
+
+// ── Exported Allergy, Price-Watch & OCR Tools ─────────────────────────────────
+
+export {
+  loadRecipientAllergies,
+  addRecipientAllergy,
+  removeRecipientAllergy,
+  checkMedicationAllergies,
+};
+
+export function checkRecipientAllergies(
+  medications: string[],
+  recipientId?: string,
+): AllergyCheckResult {
+  return checkMedicationAllergies(medications, recipientId);
+}
+
+export async function runPriceWatch(
+  recipientId?: string,
+  medications?: string[],
+  zipCode?: string,
+): Promise<PriceWatchResult> {
+  return await runPriceWatchForRecipient(recipientId, medications, zipCode);
+}
+
+export async function extractBillLineItemsFromImage(
+  imageBase64: string,
+): Promise<OcrExtractionResult> {
+  return await extractLineItemsFromBillImage(imageBase64);
+}
 
 // Start scanner (runs in-process). Interval is conservative (5s).
 const pendingTransactionScanner = setInterval(() => {
